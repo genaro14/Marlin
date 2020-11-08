@@ -34,7 +34,7 @@
 #include "planner.h"
 #include "../HAL/shared/Delay.h"
 
-#include "../lcd/ultralcd.h"
+#include "../lcd/marlinui.h"
 
 #if ENABLED(DWIN_CREALITY_LCD)
   #include "../lcd/dwin/e3v2/dwin.h"
@@ -268,7 +268,7 @@ const char str_t_thermal_runaway[] PROGMEM = STR_T_THERMAL_RUNAWAY,
     int16_t Temperature::maxtemp_raw_BED = HEATER_BED_RAW_HI_TEMP;
   #endif
   TERN_(WATCH_BED, bed_watch_t Temperature::watch_bed); // = { 0 }
-  TERN(PIDTEMPBED,, millis_t Temperature::next_bed_check_ms);
+  IF_DISABLED(PIDTEMPBED, millis_t Temperature::next_bed_check_ms);
 #endif // HAS_HEATED_BED
 
 #if HAS_TEMP_CHAMBER
@@ -1032,8 +1032,14 @@ void Temperature::manage_heater() {
     if (!inited) return watchdog_refresh();
   #endif
 
-  if (TERN0(EMERGENCY_PARSER, emergency_parser.killed_by_M112))
-    kill(M112_KILL_STR, nullptr, true);
+  #if ENABLED(EMERGENCY_PARSER)
+    if (emergency_parser.killed_by_M112) kill(M112_KILL_STR, nullptr, true);
+
+    if (emergency_parser.quickstop_by_M410) {
+      emergency_parser.quickstop_by_M410 = false; // quickstop_stepper may call idle so clear this now!
+      quickstop_stepper();
+    }
+  #endif
 
   if (!raw_temps_ready) return;
 
@@ -1227,9 +1233,9 @@ void Temperature::manage_heater() {
           #ifndef MIN_COOLING_SLOPE_DEG_CHAMBER_VENT
             #define MIN_COOLING_SLOPE_DEG_CHAMBER_VENT 1.5
           #endif
-          if( (temp_chamber.celsius - temp_chamber.target >= HIGH_EXCESS_HEAT_LIMIT) && !flag_chamber_excess_heat) {
-          // open vent after MIN_COOLING_SLOPE_TIME_CHAMBER_VENT seconds
-          // if the temperature did not drop at least MIN_COOLING_SLOPE_DEG_CHAMBER_VENT
+          if (!flag_chamber_excess_heat && temp_chamber.celsius - temp_chamber.target >= HIGH_EXCESS_HEAT_LIMIT) {
+            // Open vent after MIN_COOLING_SLOPE_TIME_CHAMBER_VENT seconds if the
+            // temperature didn't drop at least MIN_COOLING_SLOPE_DEG_CHAMBER_VENT
             if (next_cool_check_ms_2 == 0 || ELAPSED(ms, next_cool_check_ms_2)) {
               if (old_temp - temp_chamber.celsius < float(MIN_COOLING_SLOPE_DEG_CHAMBER_VENT)) flag_chamber_excess_heat = true; //the bed is heating the chamber too much
               next_cool_check_ms_2 = ms + 1000UL * MIN_COOLING_SLOPE_TIME_CHAMBER_VENT;
@@ -2148,7 +2154,7 @@ void Temperature::disable_all_heaters() {
 
 #if ENABLED(PRINTJOB_TIMER_AUTOSTART)
 
-  bool Temperature::over_autostart_threshold() {
+  bool Temperature::auto_job_over_threshold() {
     #if HAS_HOTEND
       HOTEND_LOOP() if (degTargetHotend(e) > (EXTRUDE_MINTEMP) / 2) return true;
     #endif
@@ -2156,8 +2162,8 @@ void Temperature::disable_all_heaters() {
         || TERN0(HAS_HEATED_CHAMBER, degTargetChamber() > CHAMBER_MINTEMP);
   }
 
-  void Temperature::check_timer_autostart(const bool can_start, const bool can_stop) {
-    if (over_autostart_threshold()) {
+  void Temperature::auto_job_check_timer(const bool can_start, const bool can_stop) {
+    if (auto_job_over_threshold()) {
       if (can_start) startOrResumeJob();
     }
     else if (can_stop) {
